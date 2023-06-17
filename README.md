@@ -1,2 +1,1 @@
-# GWAS
-GWAS-tutorial
+
