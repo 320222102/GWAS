@@ -1,0 +1,443 @@
+GWAS笔记
+拿到数据之后先检查
+一般来说gatk生成的数据是没有id的 需要加ID
+染色体编号一般是字母和数字的组合，后续分析是软件是不能够是识别的，所以需要将染色体编号替换成数字
+软件：bcftols
+### 检查染色体是否含有SNP ID ###
+### 使用bcftools 加id ###
+bcftools annotate --set-id '%CHROM\\_%POS\\_%REF\\_%FIRST_ALT' /home/hly/450resequence/cotton_SNV0601.vcf.gz | bgzip > ID.452_cotton.vcf.gz
+
+### 替换染色体编号 ###
+bcftools annotate --rename-chr /home/hly/450resequence/chromosome_map.txt ID.452_cotton.vcf.gz | bgzip > rename.ID.452_cotton.vcf.gz
+
+"替换某一个染色体时可以使用sed命令：
+sed 's/<old_column_name>/<new_column_name>/g' <input_file> > <output_file>"
+开始质控
+软件：vcftools、plink
+### 过滤 ###
+vcftools --gzvcf rename.ID.452_cotton.vcf.gz --recode --recode-INFO-all \
+		--maf 0.05 --max-missing 0.9 --min-alleles 2 --max-alleles 2 \
+		--remove-indels --out rename.ID.452_maf0.05miss0.9.vcf.gz
+
+### 杂合度过滤 ###
+python2 cotton_het.py -i rename.ID.452_maf0.05miss0.9.vcf.gz -c 0.5 \
+		-o rename.ID.452_maf0.05miss0.9het0.5
+
+### vcf转换成plink格式 ###
+plink --vcf rename.ID.452_maf0.05miss0.9het0.5.vcf.gz \
+		--allow-extra-chr --chr-set 26 --make-bed --vcf-half-call m \
+		--out rename.ID.452_maf0.05miss0.9het0.5
+
+### 剔除不要的个体 1-11 ###
+plink --bfile rename.ID.452_maf0.05miss0.9het0.5 \
+		--remove /home/hly/450resequence/remove.txt --allow-extra-chr --chr-set 26 \
+		--make-bed --out rename.ID.441_maf0.05miss0.9het0.5
+群体结构分析
+### 群体结构分析 ###
+### LD过滤 ###
+plink --bfile /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5\
+		--allow-extra-chr --chr-set 26 --indep-pairwise 50 10 0.2 \
+		--out rename.ID.441_maf0.05miss0.9het0.5
+
+### 提取 ###
+plink --bfile /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5\
+		--make-bed --extract rename.ID.441_maf0.05miss0.9het0.5.prune.in \
+		--allow-extra-chr --chr-set 26 --out rename.ID.441_maf0.05miss0.9het0.5_LD
+
+### 进行有监督的群体分群 ###
+通过查阅Du419份材料的文献： https://www.nature.com/articles/s41588-018-0119-7 比对文章中的材料分群和自己手上的现有材料进行部分分群并构建pop文件
+形如：
+A	或者	1	A
+-		  2	-
+C		  3	C
+B		  4	B
+-		  5	-
+
+### 注意：pop文件必须与bed文件放在一个文件夹里不然会报错,列数与样本数要相同 ###
+
+### 1 admixture进行群体结构分析 ###
+软件：admixture 
+
+### 写一个循环的脚本 admixture.sh ###
+for K in {1..20};\\
+     do admixture --cv /home/hly/450resequence/02_LD过滤/rename.ID.441_maf0.05miss0.9het0.5_LD.bed -j48 --supervised  $K >> log.out; done
+done
+
+" -j48:选择多线程 增加运行速度 "
+" --supervised:有监督的进行分群 "
+
+bash admixture.sh
+
+### 2 structure 进行群体结构分析 ###
+软件：structure 
+### 先生成structure执行文件 ###
+plink1 --bfile rename.ID.441_maf0.05miss0.9het0.5_LD \
+		--allow-extra-chr --chr-set 26 --recode structure \
+		--out rename.ID.441_maf0.05miss0.9het0.5_LD
+
+
+### 3 faststructure 进行群体结构分析 ###
+软件：faststructure
+
+构建进化树
+
+### 先将plink文件转成vcf文件 ###
+plink --bfile rename.ID.441_maf0.05miss0.9het0.5_LD \
+		--allow-extra-chr --chr-set 26 --recode vcf \
+		--out rename.ID.441_maf0.05miss0.9het0.5_LD
+
+### 1 SNPhylo构建进化树 ###
+软件：SNPhylo
+~/software/SNPhylo/snphylo.sh -v /home/hly/450resequence/02_LD过滤/rename.ID.441_maf0.05miss0.9het0.5_LD.vcf -A -b -B 1000 -r -a 26 -t 20 
+
+"-A  Perform multiple alignment by MUSCLE "
+"-b  Perform (non-parametric) bootstrap analysis and generate a tree"
+"-B  The_number_of_bootstrap_samples(default:100)"
+"-r  Skip the step removing low quality data (-p and -c option are ignored)"
+"-a  The_number_of_the_last_autosome (default:22)" 
+
+### 以下是其他一些选项 ###
+"snphylo.sh -v VCF_file 
+[-p Maximum_PLCS (5)] 
+[-c Minimum_depth_of_coverage (5)]
+[-H HapMap_file [-p Maximum_PNSS (5)]
+[-s Simple_SNP_file [-p Maximum_PNSS (5)]
+[-d GDS_file [-l LD_threshold (0.1)] 
+[-m MAF_threshold (0.1)] [-M Missing_rate (0.1)] 
+[-o Outgroup_sample_name] [-P Prefix_of_output_files (snphylo.output)] 
+[-b [-B The_number_of_bootstrap_samples (100)] 
+[-a The_number_of_the_last_autosome (22)] 
+[-t The_number_of_cores_used (1)] [-r] [-A] [-h]" 
+
+### 2 tassel构建进化树 ###
+软件：tassel
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl\
+		-importGuess /home/hly/450resequence/02_LD过滤/rename.ID.441_maf0.05miss0.9het0.5_LD.vcf \
+		-ExportPlugin -saveAs 441_tassel.phy -format Phylip_Inter -Xmx200g
+
+
+### 使用fasttree 生成树文件 ###
+fasttree -nt -gtr 441_tassel.phy > 441.nwk
+
+###后续可以通过iTOl、R等软件进行树的绘制
+iTOl:https://itol.embl.de/
+
+PCA
+https://s3-us-west-2.amazonaws.com/secure.notion-static.com/28bfab53-ef00-419e-917a-ab4b52abb326/PCA_%E8%B4%A8%E5%BF%83.r
+软件：GCTA
+### 生成grm文件 ###
+gcta64 --bfile /home/hly/450resequence/02_LD过滤/rename.ID.441_maf0.05miss0.9het0.5_LD --autosome  --make-grm --out rename.ID.441_maf0.05miss0.9het0.5_LD
+
+### 生成pca文件 前3个就够了 ###
+gcta64 --grm rename.ID.441_maf0.05miss0.9het0.5_LD --pca 3 --out rename.ID.441_maf0.05miss0.9het0.5_LD
+
+
+LD 衰减
+软件：PopLDdecay
+### 根据VCF文件生成r2文件 ###
+PopLDdecay -InVCF /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf -OutStat all.stat.gz -MaxDist 2000
+
+### 绘制单条线的图 ###
+perl ~/software/PopLDdecay/bin/Plot_OnePop.pl -inFile all.stat.gz --output all_441 -bin1 200 -bin2 500
+
+### 整理ID分群 这里是分3个群###
+G1.txt G2.txt G3.txt
+每一个群里包含各自的群体id
+
+### 分别进行文件生成 ###
+PopLDdecay -InVCF /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf -OutStat G1.stat.gz -SubPop G1.txt -MaxDist 2000
+PopLDdecay -InVCF /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf -OutStat G2.stat.gz -SubPop G2.txt -MaxDist 2000
+PopLDdecay -InVCF /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf -OutStat G3.stat.gz -SubPop G3.txt -MaxDist 2000
+
+
+### 制作 mutil.list 包含全部要画的.stat.gz文件 ###
+
+
+perl ~/software/PopLDdecay/bin/Plot_MultiPop.pl -inList multi.list --output rename.ID.441_maf0.05miss0.9het0.5 -bin1 200 -bin2 500
+
+
+### 使用plink计算 r2 ###
+plink --bfile /home/hly/450resequence/01_质控/rename.ID.452_maf0.05miss0.9het0.5 --ld-window-r2 0 --ld-window 99999 --ld-window-kb 1000 --r2 --allow-extra-chr --chr-set 26 --out rename.ID.452_maf0.05miss0.9het0.5 --threads 39
+
+信号选择
+###
+#信号选择
+#计算两两亚群间分化固定值Fst，窗口100kb，步长20kb
+G1和G2
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --weir-fst-pop G1.txt --weir-fst-pop G2.txt --out fst_G12_100kb-20kb --fst-window-size 100000 --fst-window-step 20000
+
+G1和G3
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --weir-fst-pop G1.txt --weir-fst-pop G3.txt --out fst_G13_100kb-20kb --fst-window-size 100000 --fst-window-step 20000
+
+G2和G3
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --weir-fst-pop G2.txt --weir-fst-pop G3.txt --out fst_G23_100kb-20kb --fst-window-size 100000 --fst-window-step 20000
+
+
+#提取亚群vcf文件
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --keep  G1.txt --recode --recode-INFO-all --out G1
+
+
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --keep  G2.txt --recode --recode-INFO-all --out G2
+
+
+vcftools --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf --keep  G3.txt --recode --recode-INFO-all --out G3
+
+
+#计算每个亚群的遗传多样性π值和Tajima'D
+#计算Tajima'D和π值需要将每个群体提出来，再进行计算
+vcftools --vcf G1.recode.vcf --out G1_pi_100kb --window-pi 100000  --window-pi-step 20000
+
+
+vcftools --vcf G2.recode.vcf --out G2_pi_100kb --window-pi 100000  --window-pi-step 20000
+
+
+vcftools --vcf G3.recode.vcf --out G3_pi_100kb --window-pi 100000  --window-pi-step 20000
+
+
+vcftools --vcf G1.recode.vcf --out G1_100kb.TajimaD   --TajimaD 100000
+
+vcftools --vcf G2.recode.vcf --out G2_100kb.TajimaD   --TajimaD 100000
+
+vcftools --vcf G3.recode.vcf --out G3_100kb.TajimaD   --TajimaD 100000
+
+###
+
+GWAS 分析
+### EMMAX ###
+软件：EMMAX
+### 将基因型文件转换成EMMAX格式 ###
+
+plink --vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf  --recode 12 transpose --output-missing-genotype 0 --out rename.ID.441_maf0.05miss0.9het0.5  --autosome-num 26
+
+###注：生成ename.ID.441_maf0.05miss0.9het0.5.tfam 、rename.ID.441_maf0.05miss0.9het0.5.tped 两个文件
+
+
+### 生成群体亲缘关系文件 ###
+### 将emmax下载到运行的文件夹下 ，因为该软件很小###
+emmax-beta-07Mar2010/emmax-kin /home/hly/450resequence/08_gwas_emmax/rename.ID.441_maf0.05miss0.9het0.5 -v -h -d 10
+
+
+
+### 准备Q文件、表型文件、协方差文件 ###
+表型数据	            协方差数据	
+  19005	19005	36.81 	  19005	19005	1	0.00001	0.00001
+	19006	19006	40.76 		19006	19006	1	0.99998	0.00001
+	19007	19007	39.63 		19007	19007	1	0.298258 0.033455
+	19008	19008	39.73 		19008	19008	1	0.00001	0.99998
+	19009	19009	35.74 		19009	19009	1	0.00001	0.014647
+	19010	19010	40.92 		19010	19010	1	0.00001	0.126801
+	19011	19011	45.98 		19011	19011	1	0.00001	0.00001
+	19012	19012	45.76 		19012	19012	1	0.00001	0.99998
+	19013	19013	38.83 		19013	19013	1	0.00001	0.00001
+	19014	19014	39.79 		19014	19014	1	0.00001	0.00001
+	19015	19015	39.41 		19015	19015	1	0.355484	0.00001
+	19016	19016	38.43 		19016	19016	1	0.436602	0.00001
+	19017	19017	38.53 		19017	19017	1	0.00001	0.00001
+	19018	19018	39.10 		19018	19018	1	0.343305	0.00001
+	19019	19019	39.53 		19019	19019	1	0.00001	0.860716
+	19020	19020	37.23 		19020	19020	1	0.00001	0.00001
+	19021	19021	36.72 		19021	19021	1	0.13592	0.535498
+  ...
+	...
+	...
+
+### 运行 emmax ###
+emmax-beta-07Mar2010/emmax -v -d 10 -t rename.ID.441_maf0.05miss0.9het0.5 -o rename.ID.441_maf0.05miss0.9het0.5 -p rename.ID.441_maf0.05miss0.9het0.5_emmax.txt -k rename.ID.441_maf0.05miss0.9het0.5.hBN.kinf -c prunData.3.Q_covariate.txt
+
+### 注：
+-t : t转置文件 rename.ID.441_maf0.05miss0.9het0.5.tfam 、rename.ID.441_maf0.05miss0.9het0.5.tped
+-k : 亲缘关系文件
+-o : 输出文件
+-p : 表型数据文件
+-c : 协方差文件
+
+最后得到.ps文件
+###
+
+### 可视化 ###
+用R包qqman、ggplot2、CMplot
+
+
+
+### gemma ###
+软件：GEMMA
+### 表型文件 ###
+
+### 合并表型文件和`test.fam`文件
+cut -f6 --complement -d " " rename.ID.441_maf0.05miss0.9het0.5.fam |paste - phenotype.txt >new.fam
+mv new.fam rename.ID.441_maf0.05miss0.9het0.5.fam
+
+### test.fam文件的第6列代表的是样本对应的表型值，其中每一行代表一个样本；需要注意的是表型文件中样本的顺序要和基因型文件一致.
+如果存在多个表型值，可以修改test.fam文件内容,第6列表示第一个表型值，第7列表示第二个表型值；依次类推
+形如：
+
+19005 19005 0 0 0       36.81
+19006 19006 0 0 0       40.76
+19007 19007 0 0 0       39.63
+19008 19008 0 0 0       39.73
+19009 19009 0 0 0       35.74
+19010 19010 0 0 0       40.92
+19011 19011 0 0 0       45.98
+19012 19012 0 0 0       45.76
+19013 19013 0 0 0       38.83
+...
+...
+...
+
+
+### 生成亲缘关系矩阵 ###
+### 使用GEMMA自带的两种算法，计算个体与个体之间基因型的相关性(n x n)
+
+### -gk 1 the centered relatedness matrix
+### -gk 2 the standardized relatedness matrix
+
+" -gk 1 : 表示计算基因组相关性矩阵时使用的是中心化的方法。中心化的相关性矩阵考虑了个体的平均相关性，即每个个体的相关性值减去所有个体相关性值的平均值。中心化的相关性矩阵可以用于消除平均相关性的影响，从而更准确地估计遗传相关性。"
+"-gk 2 : 表示计算基因组相关性矩阵时使用的是标准化的方法。标准化的相关性矩阵除了考虑个体的平均相关性外，还考虑了每个个体之间的方差。标准化的相关性矩阵可以更好地反映个体之间的相对相关性水平，因为它考虑了个体之间的变异性。"
+
+
+~/software/./gemma-0.98.5-linux-static-AMD64 -bfile rename.ID.441_maf0.05miss0.9het0.5 -gk 1 -o kin
+
+~/software/./gemma-0.98.5-linux-static-AMD64 -bfile rename.ID.441_maf0.05miss0.9het0.5 -gk 2 -p phenotype.txt -o G
+
+###
+### 准备协方差矩阵 ###
+### 第一列是截距设置为1 后面几列是PCA数据 ###
+形如：
+1   -0.0451988  0.130408    -0.0242226
+1   0.00720936  0.00125153  0.0183768
+1   -0.0164243  0.00421055  -0.000317146
+1   0.00691849  0.123369    -0.0276048
+1   -0.003518   0.0047435   0.0411488
+1   0.00325494  -0.00135297 0.0285314
+1   -0.0474278  -0.0241652  0.0444643
+
+
+### 运行混合线性模型
+### test.fam文件中表型值所在的列，表型值默认是从第6列开始的，-n 2表示第7列; 以此类推：
+
+~/software/./gemma-0.98.5-linux-static-AMD64 -bfile rename.ID.441_maf0.05miss0.9het0.5  -n  -k output/kin.cXX.txt -c c.txt -lmm 1 -o test
+
+#-lmm      [num]          specify analysis options (default 1).
+#	options:  1: Wald test
+#             2: Likelihood ratio test
+#             3: Score test
+#             4: 1-3
+#             5: Parameter estimation in the null model only
+
+
+chr	rs 	ps 	n_miss 	allele1	allele0	af 	beta 	se 	logl_H1	l_remle	p_wald
+1	1_123797_A_G 	  123797 	0    	  G  	    A  	    0.469  	6.818548e-02 	  1.758498e-01 	  -1.098338e+03  	4.856018e+00 	  6.983914e-01
+1	1_233034_A_G 	  233034 	0    	  G  	    A  	    0.483  	4.182686e-02 	  1.792839e-01 	  -1.098374e+03  	4.852449e+00 	  8.156383e-01
+1	1_267891_T_C 	  267891 	0    	  T  	    C  	    0.074  	-1.85E-01	  2.986608e-01   	-1.098408e+03  	4.792186e+00 	  5.364271e-01
+1	1_293241_A_G 	  293241 	0    	  A  	    G  	    0.465  	-9.98E-02	  1.857262e-01   	-1.098247e+03  	4.842684e+00 	  5.912087e-01
+1	1_303758_G_A 	  303758 	1    	  A  	    G  	    0.158  	1.567978e-01 	  2.580275e-01 	  -1.098144e+03  	4.848438e+00 	  5.437172e-01
+### 得到文件之后、我们需要的是染色体编号chr、SNP名称rs、位置信息ps、P值p_wald
+
+cut -f 1,2,3,12 test.assoc.txt > sort2.txt
+
+###得到整理好的文件用R画图
+
+
+
+### TASSEL ###
+软件：TASSEL
+### 计算 PCA和kinship 也可以用之前的数据###
+### PCA ###
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl -Xmx30G -fork1 -vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \
+		-PrincipalComponentsPlugin  -ncomponents 3  -covariance true \
+		-endPlugin -export pca -runfork1
+
+### kinship ###
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl -Xmx30G -vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \
+		-KinshipPlugin -method Centered_IBS -endPlugin -export kinship.txt \
+		-exportType SqrMatrix 
+
+
+###GLM 一般线性模型不包括kinship   ###
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl -Xmx30G -fork1 -vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \ 
+		-fork2 -t phenotype.txt -fork3 -q pca1.txt -excludeLastTrait \
+		-combine5 -input1 -input2 -input3 -intersect -FixedEffectLMPlugin \
+		-endPlugin -export gwas_hd_GLM
+
+### 从文件中提取需要的列 ###
+cut -f 2,3,4,6 gwas_hd_GLM1.txt > glm_pvalue.txt
+
+###MLM 混合线性模型  ###
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl -Xmx30g -fork1 -vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \
+		-fork2 -r phenotype.txt -fork3 -q pca1.txt -excludeLastTrait \
+    -fork4 -k kinship.txt -combine5 -input1 -input2 -input3 \
+    -intersect -combine6 -input5 -input4 -mlm -mlmVarCompEst P3D \
+    -mlmCompressionLevel None  -export gwas_hd_MLM \
+		-runfork1 -runfork2 -runfork3 -runfork4
+
+cut -f 2,3,4,7 gwas_hd_CMLM2.txt|grep -v "NaN" >mlm_pvalue.txt
+
+
+#CMLM 
+~/software/tassel/tasseladmin-tassel-5-standalone-92aa00d5b2c7/run_pipeline.pl -Xmx30g -fork1 -vcf /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \
+    -fork2 -r phenotype.txt -fork3 -q pca1.txt -excludeLastTrait \
+    -fork4 -k kinship.txt -combine5 -input1 -input2 -input3 \
+    -intersect -combine6 -input5 -input4 -mlm -mlmVarCompEst P3D \
+    -mlmCompressionLevel Optimum  -export gwas_hd_CMLM -runfork1 -runfork2 -runfork3 -runfork4
+
+cut -f 2,3,4,7 gwas_hd_CMLM2.txt|grep -v "NaN" >cmlm_pvalue.txt
+
+
+### GAIPT ###
+不会
+
+LD block
+### haploview ###
+软件：Haploview
+
+### 数据生成 ###
+plink --bfile /home/hly/450resequence/01_质控/rename.ID.452_maf0.05miss0.9het0.5\
+	  --allow-extra-chr --chr-set 26 --recode HV \
+		--out rename.ID.452_maf0.05miss0.9het0.5
+
+### 每一个染色体都会产生两个文件（Linkage format 和 map info），如, snp.chr-1.ped和snp.chr-1.info ###
+
+
+### 运行 ###
+java -jar ~/software/Haploview.jar -memory 30000 -pedfile rename.ID.452_maf0.05miss0.9het0.5.chr-26.ped -info rename.ID.452_maf0.05miss0.9het0.5.chr-26.info -skipcheck -svg -nogui
+
+### 文件太大 或者想选择某个SNP上下游画LDblock可按下列步骤操作 ###
+
+### 确定目标SNP -> 选取上下1000k的SNP(自行选择) ###
+
+### 从VCF下手 ###
+
+### 1 获取 VCF 表头 ###
+grep -n CHROM rename.ID.452_maf0.05miss0.9het0.5.vcf
+sed '32p' rename.ID.452_maf0.05miss0.9het0.5.vcf > chr26.vcf
+
+### 2 获取需要的SNP ###
+### 确定目标SNP在info文件的行数和在染色体上的位置 得到是在第2685210行、位置是2687008，找上下1000k的位置###
+grep -n 目标SNP的ID rename.ID.452_maf0.05miss0.9het0.5.vcf 
+### 找到上下界限SNP 用位置查找 找一个最接近的###
+grep 5326 rename.ID.452_maf0.05miss0.9het0.5.vcf
+grep 5526 rename.ID.452_maf0.05miss0.9het0.5.vcf
+### grep -n 获取行号
+grep -n 26_53262679_G_A rename.ID.452_maf0.05miss0.9het0.5.chr-26.info
+grep -n 26_55263854_T_C -n rename.ID.452_maf0.05miss0.9het0.5.chr-26.info
+
+### 得到区间是 2685210-2687008 用sed得到该区间的SNP编号###
+sed -n '2685210,2687008p' rename.ID.452_maf0.05miss0.9het0.5.chr-26.vcf > info.vcf
+
+### 将info.vcf 拼接到 chr26.vcf中
+cat info.vcf >> chr26.vcf
+
+### 将vcf文件转换成Haploview格式 ，运行 ###
+plink1 --vcf /home/hly/450resequence/01_质控/chr26.vcf --allow-extra-chr --chr-set 26 --recode HV --out 26
+
+java -jar ~/software/Haploview.jar -memory 30000 -pedfile 26.chr-26.ped -info 26.chr-26.info -skipcheck -svg -nogui
+
+### LDBlockShow ###
+软件：LDBlockShow
+
+### 运行 ### 
+LDBlockShow -InVCF /home/hly/450resequence/01_质控/rename.ID.441_maf0.05miss0.9het0.5.vcf \
+		-OutPut rename.ID.441_maf0.05miss0.9het0.5 \
+		-Region 26:53763818:54762318 -OutPng -SeleVar 2
+
+
